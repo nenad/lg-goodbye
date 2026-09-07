@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# Reject LG endpoints that bypass DNS and /etc/hosts.
+#
+# "unreachable" routes fail immediately instead of silently timing out. The
+# routes affect only these exact IPv4 addresses, so unrelated streaming traffic
+# remains available. They are kernel state and disappear at reboot; placing
+# this executable in Homebrew's init.d directory recreates them every boot.
+
+set -eu
+
+for destination in \
+    156.147.69.32/32 \
+    54.186.247.229/32
+do
+    if ip route replace unreachable "$destination"; then
+        echo "[20-block-lg-ips] blocked $destination" >&2
+    else
+        echo "[20-block-lg-ips] failed to block $destination" >&2
+        exit 1
+    fi
+done
+
+exit 0

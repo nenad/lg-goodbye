@@ -1,0 +1,125 @@
+#!/bin/sh
+#
+# Persist consent, ACR, and app-update state across webOS reboots.
+#
+# Some webOS services restore cached consent and update data during startup.
+# Homebrew runs this script once during boot; it applies an immediate pass and
+# starts a delayed second pass after late-starting services have settled.
+#
+# State is checked before calling the helper scripts, avoiding unnecessary
+# writes and timestamped backups on every boot.
+
+set -u
+
+LOCKOUT_DIR=/var/lib/webosbrew/lg-lockout
+DECLINE_SCRIPT="$LOCKOUT_DIR/decline-tos.sh"
+CLEAR_SCRIPT="$LOCKOUT_DIR/clear-app-update-gate.sh"
+EULA_FILE=/var/luna/preferences/eula
+OPTION_FILE=/var/luna/preferences/option
+GENERAL_FILE=/var/luna/preferences/general
+ACR_DIR=/mnt/lg/cmn_data/acr/data
+ACR_OPTOUT="$ACR_DIR/eula_disallowed_rebooted"
+UPDATE_BASE=/mnt/lg/cmn_data/var/palm/data/com.webos.appInstallService
+
+log() {
+    echo "[30-enforce-lg-privacy] $*" >&2
+}
+
+privacy_is_enforced() {
+    [ -f "$EULA_FILE" ] || return 1
+    [ -f "$OPTION_FILE" ] || return 1
+    [ -f "$GENERAL_FILE" ] || return 1
+    [ -f "$ACR_OPTOUT" ] || return 1
+    [ ! -e "$ACR_DIR/eula_allowed" ] || return 1
+
+    python3 - "$EULA_FILE" "$OPTION_FILE" "$GENERAL_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as source:
+    eula = json.load(source)
+with open(sys.argv[2]) as source:
+    option = json.load(source)
+with open(sys.argv[3]) as source:
+    general = json.load(source)
+
+status = eula.get("eulaStatus")
+if not isinstance(status, dict):
+    raise SystemExit(1)
+
+allowed = [value for key, value in status.items() if key.endswith("Allowed")]
+if not allowed or any(value is not False for value in allowed):
+    raise SystemExit(1)
+
+for section in ("eulaInfo", "eulaInfoNetwork"):
+    for document in eula.get(section, {}).get("eulaList", []):
+        if isinstance(document, dict) and "accepted" in document:
+            if document["accepted"] is not False:
+                raise SystemExit(1)
+
+option_expected = {
+    "voiceAllowed": False,
+    "voice2Allowed": False,
+    "watchedListCollection": "off",
+    "usageCare": False,
+    "dbgLogUpload": False,
+    "faultLogUpload": False,
+    "thirdPartyCookie": "off",
+}
+for key, expected in option_expected.items():
+    if key in option and option[key] != expected:
+        raise SystemExit(1)
+
+general_expected = {
+    "aiNudge": "off",
+    "screenSaverAd": "off",
+    "homePromotion": "off",
+    "launchEulaByHome": False,
+}
+for key, expected in general_expected.items():
+    if key in general and general[key] != expected:
+        raise SystemExit(1)
+PY
+}
+
+enforce_once() {
+    if [ ! -x "$DECLINE_SCRIPT" ] || [ ! -x "$CLEAR_SCRIPT" ]; then
+        log "required helper scripts are missing or not executable"
+        return 1
+    fi
+
+    if privacy_is_enforced; then
+        log "consent and ACR state already enforced"
+    else
+        log "consent or ACR state drifted; reapplying"
+        sh "$DECLINE_SCRIPT" || return 1
+    fi
+
+    clear_needed=0
+    for file in "$UPDATE_BASE/updateInfo" \
+                "$UPDATE_BASE/updateDependencyInfo"
+    do
+        [ -s "$file" ] && clear_needed=1
+    done
+
+    if [ "$clear_needed" -eq 1 ]; then
+        log "app-update state is non-empty; clearing"
+        sh "$CLEAR_SCRIPT" || return 1
+    else
+        log "app-update state already empty or absent"
+    fi
+}
+
+if [ "${1:-}" = "--delayed" ]; then
+    sleep 30
+    enforce_once
+    exit $?
+fi
+
+enforce_once
+
+# Detach the delayed pass so Homebrew startup is not held up for 30 seconds.
+"$0" --delayed </dev/null \
+    >/tmp/lg-lockout-enforce-delayed.log 2>&1 &
+
+exit 0

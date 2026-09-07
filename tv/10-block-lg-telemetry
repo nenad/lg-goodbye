@@ -1,0 +1,158 @@
+#!/bin/sh
+#
+# Bind-mount a strict LG blocklist over /etc/hosts.
+#
+# webOS keeps /etc on a read-only overlay, so editing /etc/hosts directly is
+# unreliable. Homebrew Channel uses the same bind-mount technique for its core
+# OTA block. This script runs after that built-in mount and stacks the extended
+# blocklist on top.
+#
+# The strict list intentionally disables LG Content Store, LG Shop, and LG
+# voice search. It does not block third-party streaming services.
+
+set -eu
+
+HOSTS_SRC=/etc/hosts
+HOSTS_TMP=/tmp/hosts.lg-block
+HOSTS_PRISTINE=/tmp/hosts.lg-block.pristine
+MOUNT_POINT=/etc/hosts
+
+BLOCK_HOSTS='
+# OTA and OS updates
+snu.lge.com
+su.lge.com
+su-ssl.lge.com
+nsu.lge.com
+snu-dev.lge.com
+su-dev.lge.com
+
+# SDX telemetry
+nextlgsdp.com
+ibs.nextlgsdp.com
+ibsstat.nextlgsdp.com
+rdx2.nextlgsdp.com
+lgtvcommon.com
+netflixvoice.lgtvcommon.com
+nudge.lgtvcommon.com
+homeprv.lgtvcommon.com
+wiseconfig.lgtvcommon.com
+pnv.lgtvcommon.com
+recommend.lgtvcommon.com
+cdpsvc.lgtvcommon.com
+cpauth.lgtvcommon.com
+cdpbeacon.lgtvcommon.com
+rdl.lgtvcommon.com
+wiseresource.lgtvcommon.com
+qcardservice.lgtvcommon.com
+qt2-kic.lab.lgtvcommon.com
+lggalleryplus.com
+tv.wiselg.com
+
+# Ads
+lgsmartad.com
+info.lgsmartad.com
+
+# ThinQ and IoT
+lgtviot.com
+api.lgtviot.com
+commonpush.lgtviot.com
+sports.lgtviot.com
+ocp.lgtviot.com
+push.lgtviot.com
+buddy.lgtviot.com
+lgthinq.com
+common.lgthinq.com
+connect-client.lgthinq.com
+
+# LG AI platform
+ngfts.lge.com
+qt2-ngfts.lge.com
+kic-ngfts.lge.com
+kic-qt2-ngfts.lge.com
+
+# Voice search
+lgsmartweb.com
+lgvoice.com
+
+# Content Store and LG Shop
+lgtvsdp.com
+lgappstv.com
+lgshopsvc.lgappstv.com
+'
+
+log() {
+    echo "[10-block-lg-telemetry] $*" >&2
+}
+
+custom_mount_active() {
+    # Homebrew may already have tmpfs[/hosts] mounted on /etc/hosts. Check for
+    # our exact source instead of treating any mount as ours.
+    findmnt -n -o source "$MOUNT_POINT" 2>/dev/null |
+        grep -q "tmpfs\\[/${HOSTS_TMP#/tmp/}\\]"
+}
+
+append_blocklist() {
+    printf '\n# LG lockout block list (10-block-lg-telemetry)\n' \
+        >> "$HOSTS_TMP"
+
+    printf '%s\n' "$HOSTS_FILTERED" | while read -r host; do
+        [ -n "$host" ] && printf '0.0.0.0 %s\n' "$host" >> "$HOSTS_TMP"
+    done
+    printf '%s\n' "$HOSTS_FILTERED" | while read -r host; do
+        [ -n "$host" ] && printf '::1 %s\n' "$host" >> "$HOSTS_TMP"
+    done
+}
+
+if [ -f /var/luna/preferences/webosbrew_block_updates_extra_off ]; then
+    log "opt-out flag is present; skipping extended blocklist"
+    exit 0
+fi
+
+[ -f "$HOSTS_SRC" ] || {
+    log "fatal: $HOSTS_SRC is missing"
+    exit 1
+}
+
+HOSTS_FILTERED=$(
+    printf '%s\n' "$BLOCK_HOSTS" |
+        sed 's/[[:space:]]*#.*$//' |
+        sed '/^[[:space:]]*$/d'
+)
+
+if custom_mount_active; then
+    log "custom bind mount is active; refreshing its contents"
+    if [ -f "$HOSTS_PRISTINE" ]; then
+        cp -f "$HOSTS_PRISTINE" "$HOSTS_TMP"
+    else
+        # Preserve the stock and Homebrew entries while removing entries from
+        # an older copy of this script.
+        sed \
+            -e '/^# LG lockout block list/d' \
+            -e '/^0\.0\.0\.0 /d' \
+            -e '/^::1[[:space:]][^[:space:]]*[[:space:]]*$/d' \
+            "$HOSTS_SRC" > "$HOSTS_TMP"
+    fi
+    append_blocklist
+    exit 0
+fi
+
+# First invocation this boot: save the effective Homebrew hosts file, append
+# our strict list, and stack another bind mount over /etc/hosts.
+cp -f "$HOSTS_SRC" "$HOSTS_TMP"
+cp -f "$HOSTS_SRC" "$HOSTS_PRISTINE"
+append_blocklist
+
+if ! mount --bind "$HOSTS_TMP" "$MOUNT_POINT" 2>/dev/null; then
+    log "fatal: could not bind-mount the blocklist"
+    exit 1
+fi
+
+if custom_mount_active; then
+    count=$(grep -c '^0\.0\.0\.0 ' "$HOSTS_TMP")
+    log "bind-mounted strict blocklist ($count hosts blocked)"
+else
+    log "fatal: mount command succeeded, but custom mount is not active"
+    exit 1
+fi
+
+exit 0
