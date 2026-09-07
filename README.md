@@ -3,6 +3,24 @@
 Installs a persistent network and privacy lockout on rooted LG webOS TVs while
 leaving unrelated internet traffic available for third-party streaming apps.
 
+## Root and SSH setup
+
+The TV must be jailbroken (rooted) before this installer can be used. Check
+your model and firmware compatibility at
+[cani.rootmy.tv](https://cani.rootmy.tv/) and follow the linked rooting
+instructions.
+
+After rooting:
+
+1. Open Homebrew Channel on the TV and enable its SSH server.
+2. Connect from your computer with `ssh root@TV_IP`.
+3. The initial root password is `alpine`.
+4. Install an SSH public key before running this installer. It deliberately
+   uses non-interactive SSH and will not prompt for a password.
+
+The default password is publicly known. Keep SSH limited to your trusted local
+network and replace password access with a key as soon as possible.
+
 ## Requirements
 
 - A rooted LG webOS TV running Homebrew Channel
